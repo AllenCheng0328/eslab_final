@@ -17,6 +17,10 @@
 #include "mbed.h"
 #include "wifi_helper.h"
 #include "mbed-trace/mbed_trace.h"
+#include "stm32l475e_iot01.h"
+#include "stm32l475e_iot01_accelero.h"
+#include "stm32l475e_iot01_gyro.h"
+
 
 #if MBED_CONF_APP_USE_TLS_SOCKET
 #include "root_ca_cert.h"
@@ -31,9 +35,9 @@ class SocketDemo {
     static constexpr size_t MAX_MESSAGE_RECEIVED_LENGTH = 100;
 
 #if MBED_CONF_APP_USE_TLS_SOCKET
-    static constexpr size_t REMOTE_PORT = 443; // tls port
+    static constexpr size_t REMOTE_PORT = 65431; // tls port
 #else
-    static constexpr size_t REMOTE_PORT = 80; // standard HTTP port
+    static constexpr size_t REMOTE_PORT = 65431; // standard HTTP port
 #endif // MBED_CONF_APP_USE_TLS_SOCKET
 
 public:
@@ -90,7 +94,7 @@ public:
             printf("Error: _socket.set_root_ca_cert() returned %d\n", result);
             return;
         }
-        _socket.set_hostname(MBED_CONF_APP_HOSTNAME);
+        _socket.set_hostname("192.168.43.219");
 #endif // MBED_CONF_APP_USE_TLS_SOCKET
 
         /* now we have to find where to connect */
@@ -115,14 +119,39 @@ public:
         }
 
         /* exchange an HTTP request and response */
-
-        if (!send_http_request()) {
-            return;
+        float SCALE_MULTIPLIER = 1;
+        int sample_num = 0;
+        int16_t pDataXYZ[] = {1, 2, 3};
+        char acc_json[100];
+        int response;
+        while (1){
+            ++sample_num;
+            BSP_ACCELERO_AccGetXYZ(pDataXYZ);
+            int x = pDataXYZ[0]*SCALE_MULTIPLIER;
+            int y = pDataXYZ[1]*SCALE_MULTIPLIER;
+            int z = pDataXYZ[2]*SCALE_MULTIPLIER;
+            int len = sprintf(acc_json ,"%d %d %d %d",((int)(x*10000))/10000,
+            ((int)(y*10000))/10000, ((int)(z*10000))/10000, sample_num);
+            response = _socket.send(acc_json,len);
+            if (0 >= response){
+                printf("Error seding: %d\n", response);
+            }
+            thread_sleep_for(10);
         }
 
+
+        if (!send_http_request("12345\r\n")) {
+            printf("normal");
+            return;
+        }
+        printf("check");
         if (!receive_http_response()) {
+            printf("no receive");
             return;
         }
+        printf("yes receive");
+        
+        
 
         printf("Demo concluded successfully \r\n");
     }
@@ -130,7 +159,7 @@ public:
 private:
     bool resolve_hostname(SocketAddress &address)
     {
-        const char hostname[] = MBED_CONF_APP_HOSTNAME;
+        const char hostname[] = "192.168.43.219";
 
         /* get the host address */
         printf("\nResolve hostname %s\r\n", hostname);
@@ -145,14 +174,14 @@ private:
         return true;
     }
 
-    bool send_http_request()
+    bool send_http_request(const char* buffer)
     {
         /* loop until whole request sent */
-        const char buffer[] = "GET / HTTP/1.1\r\n"
-                              "Host: ifconfig.io\r\n"
+        /*const char buffer[] = "GET / HTTP/1.1\r\n"
+                              "Host: 192.168.43.219\r\n"
                               "Connection: close\r\n"
                               "\r\n";
-
+        */
         nsapi_size_t bytes_to_send = strlen(buffer);
         nsapi_size_or_error_t bytes_sent = 0;
 
@@ -171,7 +200,6 @@ private:
         }
 
         printf("Complete message sent\r\n");
-
         return true;
     }
 
@@ -189,7 +217,6 @@ private:
                 printf("Error! _socket.recv() returned: %d\r\n", result);
                 return false;
             }
-
             received_bytes += result;
             remaining_bytes -= result;
         }
@@ -251,6 +278,13 @@ private:
 
 int main() {
     printf("\r\nStarting socket demo\r\n\r\n");
+
+    int16_t  pDataXYZ[3] = {0};
+    int16_t  pGyroDataXYZ[3] = {0};
+    BSP_GYRO_Init();
+    BSP_ACCELERO_Init();
+
+
 
 #ifdef MBED_CONF_MBED_TRACE_ENABLE
     mbed_trace_init();
