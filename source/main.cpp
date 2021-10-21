@@ -121,11 +121,10 @@ public:
         /* exchange an HTTP request and response */
         float SCALE_MULTIPLIER = 1;
         int sample_num = 0;
-        int16_t pDataXYZ[] = {1, 2, 3};
+        int16_t pDataXYZ[] = {0,0,0};
         char acc_json[100];
         int response;
         while (1){
-            ++sample_num;
             BSP_ACCELERO_AccGetXYZ(pDataXYZ);
             int x = pDataXYZ[0]*SCALE_MULTIPLIER;
             int y = pDataXYZ[1]*SCALE_MULTIPLIER;
@@ -137,21 +136,16 @@ public:
                 printf("Error seding: %d\n", response);
             }
             thread_sleep_for(10);
+            sample_num++;
         }
 
 
-        if (!send_http_request("12345\r\n")) {
-            printf("normal");
+        if (!send_http_request("complete\r\n")) {
             return;
         }
-        printf("check");
         if (!receive_http_response()) {
-            printf("no receive");
             return;
         }
-        printf("yes receive");
-        
-        
 
         printf("Demo concluded successfully \r\n");
     }
@@ -279,12 +273,7 @@ private:
 int main() {
     printf("\r\nStarting socket demo\r\n\r\n");
 
-    int16_t  pDataXYZ[3] = {0};
-    int16_t  pGyroDataXYZ[3] = {0};
-    BSP_GYRO_Init();
     BSP_ACCELERO_Init();
-
-
 
 #ifdef MBED_CONF_MBED_TRACE_ENABLE
     mbed_trace_init();
