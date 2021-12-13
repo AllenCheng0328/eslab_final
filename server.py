@@ -12,10 +12,11 @@ PORT = 65431 # Port to listen on (use ports > 1023)
 #sample frequency = 100 Hz
 N = 45
 switch = '1'
-datafile = open("traindata.txt","a")
+datafile = open("test_data/hybrid.txt","a")
 
 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
     s.bind((HOST, PORT))
+    sample_num = 0;
     while switch == '1':
         count = 0
         data = []
@@ -52,7 +53,8 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             plt.legend(["x","y","z"])
             plt.show()
             """
-        print("type 1 to continue, otherwise close")
+            sample_num += 1
+        print(f'sample_num :{sample_num}\ntype 1 to continue, otherwise close')
         switch = input()
     datafile.flush()
     datafile.close()

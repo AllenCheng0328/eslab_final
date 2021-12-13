@@ -123,15 +123,18 @@ public:
         
         //collecting acc, then preprocess
         const int axis_num = 3;
-        const int L = 300; //length of one gesture
-        const int sample_interval = 10; //ms
+        const int L = 300; //length of one gesture(data point)
+        const int N = 9; //number of frame, (N+1) segments
+        int Ls = int(L/(N+1));
+        const int sample_interval = 5; //ms
         int16_t pDataXYZ[] = {0,0,0};
         float scale_multi = 0.01;
-        float32_t R[axis_num][L];
+        float32_t R[axis_num][L];//raw acc data of one gesture
         char acc_json[100];
         int response;
-        int j = 0;
+
         printf("start collecting...\n");
+        int j = 0;
         while (j < L){
             BSP_ACCELERO_AccGetXYZ(pDataXYZ);
             for(int i = 0; i < axis_num; i++){
@@ -140,11 +143,9 @@ public:
             j++;
             thread_sleep_for(sample_interval);
         }
-        printf("end collecting.\n\n\n\n\n\n");
-        //main preprocess section
-        const int N = 9; //number of frame
-        int Ls = int(L/(N+1));
+        printf("end collecting.\n");
         /*
+        main preprocess section
         features of one frame:
         mu,epsilon,delta,sigma, each has [x,y,z]
         gamma, has C(3,2) = 3, [x,y,z], for x is x with y
@@ -228,7 +229,7 @@ public:
                     printf("Error seding: %d\n", response);
                     break;
                 }
-                thread_sleep_for(30);
+                thread_sleep_for(50);
             }
         }
         printf("Demo concluded successfully \r\n");
