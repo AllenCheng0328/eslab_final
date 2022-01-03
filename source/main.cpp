@@ -33,6 +33,14 @@
 #endif
 #endif // MBED_CONF_APP_USE_TLS_SOCKET
 
+#define LD1_ON     {led1 = 1;}
+#define LD1_OFF    {led1 = 0;}
+#define LD2_ON     {led2 = 1;}
+#define LD2_OFF    {led2 = 0;}
+
+DigitalOut led1(LED1);
+DigitalOut led2(LED2);
+
 class SocketDemo {
     static constexpr size_t MAX_NUMBER_OF_ACCESS_POINTS = 10;
     static constexpr size_t MAX_MESSAGE_RECEIVED_LENGTH = 100;
@@ -55,11 +63,11 @@ public:
         }
     }
 
-    void run()
+    bool conn_wifi()
     {
         if (!_net) {
             printf("Error! No network interface found.\r\n");
-            return;
+            return false;
         }
 
         /* if we're using a wifi interface run a quick scan */
@@ -75,52 +83,52 @@ public:
         /* connect will perform the action appropriate to the interface type to connect to the network */
 
         printf("Connecting to the network...\r\n");
-
+        
         nsapi_size_or_error_t result = _net->connect();
         if (result != 0) {
             printf("Error! _net->connect() returned: %d\r\n", result);
-            return;
+            return false;
         }
 
         print_network_info();
 
-        /* opening the socket only allocates resources */
+        /*opening the socket only allocates resources */
+        
         result = _socket.open(_net);
         if (result != 0) {
             printf("Error! _socket.open() returned: %d\r\n", result);
-            return;
+            return false;
         }
 
 #if MBED_CONF_APP_USE_TLS_SOCKET
         result = _socket.set_root_ca_cert(root_ca_cert);
         if (result != NSAPI_ERROR_OK) {
             printf("Error: _socket.set_root_ca_cert() returned %d\n", result);
-            return;
+            return false;
         }
         _socket.set_hostname("192.168.43.219");
 #endif // MBED_CONF_APP_USE_TLS_SOCKET
 
         /* now we have to find where to connect */
-
-        SocketAddress address;
-
+        //address is a private data member
         if (!resolve_hostname(address)) {
-            return;
+            return false;
         }
 
         address.set_port(REMOTE_PORT);
-
+        
         /* we are connected to the network but since we're using a connection oriented
          * protocol we still need to open a connection on the socket */
-
+        
         printf("Opening connection to remote port %d\r\n", REMOTE_PORT);
 
         result = _socket.connect(address);
         if (result != 0) {
             printf("Error! _socket.connect() returned: %d\r\n", result);
-            return;
+            return false;
         }
         
+        /*
         //collecting acc, then preprocess
         const int axis_num = 3;
         const int L = 300; //length of one gesture(data point)
@@ -144,13 +152,13 @@ public:
             thread_sleep_for(sample_interval);
         }
         printf("end collecting.\n");
-        /*
+        
         main preprocess section
         features of one frame:
         mu,epsilon,delta,sigma, each has [x,y,z]
         gamma, has C(3,2) = 3, [x,y,z], for x is x with y
         features of all frames are stored by 3d array: feature
-        */
+        
         float32_t feature[N][5][axis_num] = {0};
         arm_rfft_fast_instance_f32 fftins;
         arm_rfft_fast_init_f32(&fftins, 64);
@@ -220,20 +228,35 @@ public:
                 delete [] freqframe;
             }
         }
-        //send sampledata to python server
-        for(int i = 0; i < N; i++){
-            for(int j = 0; j < 5; j++){
-                int len = sprintf(acc_json ,"%f %f %f ", feature[i][j][0], feature[i][j][1], feature[i][j][2]);
-                response = _socket.send(acc_json,len);
-                if (0 >= response){
-                    printf("Error seding: %d\n", response);
-                    break;
-                }
-                thread_sleep_for(50);
-            }
-        }
-        printf("Demo concluded successfully \r\n");
+        */
+        
+        printf("Wifi connected.\r\n");
+        return true;
     }
+
+    bool send(int16_t** R, int sample_num)
+    {
+        //start sending
+        char acc_json[100];
+        int response;
+        int len = sprintf(acc_json ,"%d", sample_num+1);
+        _socket.send(acc_json,len);
+        thread_sleep_for(30);
+        //send sampledata to python server
+        for(int i = 0; i <= sample_num; i ++){
+            len = sprintf(acc_json ,"%d %d %d ", R[0][i], R[1][i], R[2][i]);
+            response = _socket.send(acc_json,len);
+            if (0 >= response){
+                printf("Error seding: %d\n", response);
+                return false;
+            }
+            thread_sleep_for(10);
+        }
+        
+        return true;
+        
+    }
+
 
 private:
     bool resolve_hostname(SocketAddress &address)
@@ -347,6 +370,7 @@ private:
 
 private:
     NetworkInterface *_net;
+    SocketAddress address;
 
 #if MBED_CONF_APP_USE_TLS_SOCKET
     TLSSocket _socket;
@@ -356,17 +380,173 @@ private:
 };
 
 int main() {
-    printf("\r\nStarting socket demo\r\n\r\n");
-
+    LD2_OFF;
+    printf("\r\nGesture detection start.\r\n\r\n");
     BSP_ACCELERO_Init();
 
 #ifdef MBED_CONF_MBED_TRACE_ENABLE
     mbed_trace_init();
 #endif
 
-    SocketDemo *example = new SocketDemo();
-    MBED_ASSERT(example);
-    example->run();
+    SocketDemo *WIFI = new SocketDemo();
+    MBED_ASSERT(WIFI);
+    while(!WIFI->conn_wifi()){
+        delete WIFI;
+        WIFI = new SocketDemo();
+        thread_sleep_for(5000);
+    }
 
+    const int axis_num = 3;
+    const int sample_interval = 10; //ms
+    int16_t pDataXYZ[] = {0,0,0};
+    int16_t **R = new int16_t*[axis_num];//raw acc data of one gesture
+    int Rcap = 300;
+    for(int i = 0; i < axis_num; i++){
+        R[i] = new int16_t[Rcap];
+    }
+    //main repeat loop: listening -> get critical data -> send -> loop
+    while(1){
+        printf("observing acc...\n");
+        while(1){
+            BSP_ACCELERO_AccGetXYZ(pDataXYZ);
+            int threshold = 1700; // unit: 0.01m/ss
+            if(abs(pDataXYZ[0]) > threshold || abs(pDataXYZ[1]) > threshold || abs(pDataXYZ[2]) > threshold){
+                printf("over threshold!\n");
+                break;
+            }
+        }
+        thread_sleep_for(1000);
+        LD2_ON;
+        printf("start collecting...\n");
+        int sample_num = 0;
+        bool idle = false;
+        const int tailnum = 100;
+        int tailsum[axis_num] = {0};
+        float taildiff[axis_num] = {0};
+        while (!idle){
+            BSP_ACCELERO_AccGetXYZ(pDataXYZ);
+            //handle R overflow
+            if(sample_num >= Rcap){
+                int16_t *Rtemp = new int16_t[2*Rcap];
+                for(int i = 0; i < axis_num; i++){
+                    for(int j = 0; j < Rcap; j++){
+                        Rtemp[j] = R[i][j];
+                    }
+                    delete [] R[i];
+                    R[i] = Rtemp;
+                }
+                Rcap *= 2;
+            }
+            //detect idle
+            for(int i = 0; i < axis_num; i++){
+                R[i][sample_num] = pDataXYZ[i];
+                if(sample_num >= tailnum){
+                    tailsum[i] = 0;
+                    taildiff[i] = 0;
+                    for(int j = 0; j < tailnum; j++){
+                        tailsum[i] += R[i][sample_num-j];
+                    }
+                    for(int j = 0; j < tailnum; j++){
+                        taildiff[i] += abs(R[i][sample_num-j]-tailsum[i]/tailnum);
+                    }
+                }
+            }
+            if(sample_num >= tailnum){
+                printf("%f, %f, %f\n",taildiff[0]/tailnum,taildiff[1]/tailnum,taildiff[2]/tailnum);
+                if(taildiff[0]/tailnum < 100 && taildiff[1]/tailnum < 100 && taildiff[2]/tailnum < 100){
+                    idle = true;
+                    printf("idle detected!\n");
+                }
+            }
+            
+            sample_num++;
+            thread_sleep_for(sample_interval);
+        }
+        printf("end collecting.\n");
+        LD2_OFF;
+        /*
+        main preprocess section
+        features of one frame:
+        mu,epsilon,delta,sigma, each has [x,y,z]
+        gamma, has C(3,2) = 3, [x,y,z], for x is x with y
+        features of all frames are stored by 3d array: feature
+        
+        float32_t feature[N][5][axis_num] = {0};
+        arm_rfft_fast_instance_f32 fftins;
+        arm_rfft_fast_init_f32(&fftins, 64);
+
+        for (int fseq = 0; fseq < N; fseq++){
+            for(int axis = 0; axis < axis_num; axis++){
+                float32_t *timeframe = new float32_t[2*Ls];
+                float32_t *natimeframe = new float32_t[2*Ls];
+                float32_t *freqframe = new float32_t[2*Ls];
+                float32_t freqframe_mag[Ls];
+                for(int i = 0; i < 2*Ls; i++){
+                    timeframe[i] = 0;
+                    natimeframe[i] = 0;
+                    freqframe[i] = 0;
+                }
+                for(int i = 0; i < 2*Ls; i++){
+                    //extract frame data from R
+                    timeframe[i] = R[axis][i+fseq*Ls];
+                    natimeframe[i] = R[(axis+1)%3][i+fseq*Ls];         
+                }
+                arm_rfft_fast_f32(&fftins, timeframe, freqframe, 0);
+                
+                //mu,index 0--------------------------------------
+                feature[fseq][0][axis] = freqframe[0];
+                //epsilon,index 1---------------------------------
+                float32_t magsum = 0;
+                for(int i = 1; i < Ls; i++){
+                    freqframe_mag[i] = sqrt(pow(freqframe[2*i],2)+pow(freqframe[2*i+1],2));
+                    magsum += freqframe_mag[i];
+                }
+                for(int i = 1; i < Ls; i++){
+                    feature[fseq][1][axis] += pow(freqframe_mag[i],2);
+                }
+                feature[fseq][1][axis] /= Ls-1;
+                //delta,index 2-----------------------------------
+                float32_t p;
+                for(int i = 1; i < Ls; i++){
+                    p = freqframe_mag[i]/magsum;
+                    feature[fseq][2][axis] += p == 0 ? 0 : p*log(1/p);
+                }
+                //sigma,index 3-----------------------------------
+                float32_t time_bar = 0;
+                float32_t natime_bar = 0;
+                float32_t nasigma = 0;
+                for(int i = 0; i < 2*Ls; i++){
+                    time_bar += timeframe[i];
+                    natime_bar += natimeframe[i];
+                }
+                time_bar /= 2*Ls;
+                natime_bar /= 2*Ls;
+                for( int i = 0; i < 2*Ls; i++){
+                    feature[fseq][3][axis] += pow(timeframe[i]-time_bar, 2);
+                    nasigma += pow(natimeframe[i]-natime_bar, 2);
+                }
+                feature[fseq][3][axis] /= 2*Ls;
+                nasigma /= 2*Ls;
+                feature[fseq][3][axis] = sqrt(feature[fseq][3][axis]);
+                nasigma = sqrt(nasigma);
+                //gamma,index 4-----------------------------------
+                for(int i = 0; i < 2*Ls; i++){
+                    feature[fseq][4][axis] += (timeframe[i]-time_bar)*(natimeframe[i]-natime_bar);
+                }
+                feature[fseq][4][axis] /= 2*Ls*feature[fseq][3][axis]*nasigma;
+                //delete
+                delete [] timeframe;
+                delete [] natimeframe;
+                delete [] freqframe;
+            }
+        }*/
+        if(!WIFI->send(R, sample_num-80)){
+            delete WIFI;
+            WIFI = new SocketDemo();
+            WIFI->conn_wifi();
+            WIFI->send(R, sample_num-80);
+        }
+    }
+    
     return 0;
 }
