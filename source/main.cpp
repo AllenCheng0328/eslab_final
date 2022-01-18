@@ -15,14 +15,20 @@
  */
 
 #include "mbed.h"
+#include "math.h"
 #include "arm_math.h"
-#include "math_helper.h"
 #include "wifi_helper.h"
 #include "mbed-trace/mbed_trace.h"
 #include "stm32l475e_iot01.h"
 #include "stm32l475e_iot01_accelero.h"
 #include "stm32l475e_iot01_gyro.h"
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
+
+#if defined(SEMIHOSTING)
+#include <stdio.h>
+#endif
 
 
 #if MBED_CONF_APP_USE_TLS_SOCKET
@@ -106,7 +112,7 @@ public:
             printf("Error: _socket.set_root_ca_cert() returned %d\n", result);
             return false;
         }
-        _socket.set_hostname("192.168.43.219");
+        _socket.set_hostname("172.20.10.13");
 #endif // MBED_CONF_APP_USE_TLS_SOCKET
 
         /* now we have to find where to connect */
@@ -257,11 +263,34 @@ public:
         
     }
 
+    // bool send(float32_t R[3][200], int sample_num)
+    // {
+    //     //start sending
+    //     char acc_json[100];
+    //     int response;
+    //     int len = sprintf(acc_json ,"%d", sample_num+1);
+    //     _socket.send(acc_json,len);
+    //     thread_sleep_for(30);
+    //     //send sampledata to python server
+    //     for(int i = 0; i <= sample_num; i ++){
+    //         len = sprintf(acc_json ,"%f %f %f ", R[0][i], R[1][i], R[2][i]);
+    //         response = _socket.send(acc_json,len);
+    //         if (0 >= response){
+    //             printf("Error seding: %d\n", response);
+    //             return false;
+    //         }
+    //         thread_sleep_for(10);
+    //     }
+        
+    //     return true;
+        
+    // }
+
 
 private:
     bool resolve_hostname(SocketAddress &address)
     {
-        const char hostname[] = "192.168.43.219";
+        const char hostname[] = "172.20.10.13";
 
         /* get the host address */
         printf("\nResolve hostname %s\r\n", hostname);
@@ -379,6 +408,48 @@ private:
 #endif // MBED_CONF_APP_USE_TLS_SOCKET
 };
 
+#define TEST_LENGTH_SAMPLES  600
+
+#define SNR_THRESHOLD_F32    75.0f
+#define BLOCK_SIZE            32
+
+#if defined(ARM_MATH_MVEF) && !defined(ARM_MATH_AUTOVECTORIZE)
+/* Must be a multiple of 16 */
+#define NUM_TAPS_ARRAY_SIZE              32
+#else
+#define NUM_TAPS_ARRAY_SIZE              29
+#endif
+
+#define NUM_TAPS              29
+
+/* -------------------------------------------------------------------
+ * Declare State buffer of size (numTaps + blockSize - 1)
+ * ------------------------------------------------------------------- */
+#if defined(ARM_MATH_MVEF) && !defined(ARM_MATH_AUTOVECTORIZE)
+static float32_t firStateF32[2 * BLOCK_SIZE + NUM_TAPS - 1];
+#else
+static float32_t firStateF32[BLOCK_SIZE + NUM_TAPS - 1];
+#endif 
+
+#if defined(ARM_MATH_MVEF) && !defined(ARM_MATH_AUTOVECTORIZE)
+const float32_t firCoeffs32[NUM_TAPS_ARRAY_SIZE] = {
+  -0.0018225230f, -0.0015879294f, +0.0000000000f, +0.0036977508f, +0.0080754303f, +0.0085302217f, -0.0000000000f, -0.0173976984f,
+  -0.0341458607f, -0.0333591565f, +0.0000000000f, +0.0676308395f, +0.1522061835f, +0.2229246956f, +0.2504960933f, +0.2229246956f,
+  +0.1522061835f, +0.0676308395f, +0.0000000000f, -0.0333591565f, -0.0341458607f, -0.0173976984f, -0.0000000000f, +0.0085302217f,
+  +0.0080754303f, +0.0036977508f, +0.0000000000f, -0.0015879294f, -0.0018225230f, 0.0f,0.0f,0.0f
+};
+#else
+const float32_t firCoeffs32[NUM_TAPS_ARRAY_SIZE] = {
+  -0.0018225230f, -0.0015879294f, +0.0000000000f, +0.0036977508f, +0.0080754303f, +0.0085302217f, -0.0000000000f, -0.0173976984f,
+  -0.0341458607f, -0.0333591565f, +0.0000000000f, +0.0676308395f, +0.1522061835f, +0.2229246956f, +0.2504960933f, +0.2229246956f,
+  +0.1522061835f, +0.0676308395f, +0.0000000000f, -0.0333591565f, -0.0341458607f, -0.0173976984f, -0.0000000000f, +0.0085302217f,
+  +0.0080754303f, +0.0036977508f, +0.0000000000f, -0.0015879294f, -0.0018225230f
+};
+#endif
+
+uint32_t blockSize = BLOCK_SIZE;
+uint32_t numBlocks = TEST_LENGTH_SAMPLES/BLOCK_SIZE;
+
 int main() {
     LD2_OFF;
     printf("\r\nGesture detection start.\r\n\r\n");
@@ -396,31 +467,63 @@ int main() {
         thread_sleep_for(5000);
     }
 
+    uint32_t i;
+    arm_fir_instance_f32 S;
+    arm_status status;
+    float32_t  *inputF32, *outputF32;
+    float32_t R_filtered[3][200];
+
+    float32_t acc_data[200];
+
+    arm_fir_init_f32(&S, NUM_TAPS, (float32_t *)&firCoeffs32[0], &firStateF32[0], blockSize);
+
     const int axis_num = 3;
-    const int sample_interval = 10; //ms
+    const int sample_interval = 5; //ms
     int16_t pDataXYZ[] = {0,0,0};
-    int16_t **R = new int16_t*[axis_num];//raw acc data of one gesture
+    int16_t **R = new int16_t*[axis_num]; //raw acc data of one gesture
+    int16_t **R_pre = new int16_t*[axis_num]; //raw acc data of one gesture (pre_collect)
+    int16_t **R_int = new int16_t*[axis_num]; //
     int Rcap = 300;
+    int Rpcap = 50;
+    int Rint = 5;
     for(int i = 0; i < axis_num; i++){
         R[i] = new int16_t[Rcap];
+    }
+    for(int i = 0; i < axis_num; i++){
+        R_pre[i] = new int16_t[Rpcap];
     }
     //main repeat loop: listening -> get critical data -> send -> loop
     while(1){
         printf("observing acc...\n");
-        while(1){
-            BSP_ACCELERO_AccGetXYZ(pDataXYZ);
-            int threshold = 1700; // unit: 0.01m/ss
-            if(abs(pDataXYZ[0]) > threshold || abs(pDataXYZ[1]) > threshold || abs(pDataXYZ[2]) > threshold){
-                printf("over threshold!\n");
-                break;
+        for(int i = 0; i < Rpcap; i++){
+            for(int j = 0; j < axis_num; j++){
+                R_pre[j][i] = 0;
             }
         }
-        thread_sleep_for(1000);
+        while(1){
+            BSP_ACCELERO_AccGetXYZ(pDataXYZ);
+
+            for(int i = 0; i < Rpcap-1; i++){
+                for(int j = 0; j < axis_num; j++){
+                    R_pre[j][i] = R_pre[j][i+1];
+                }
+            }
+            for(int j = 0; j < axis_num; j++){
+                R_pre[j][Rpcap-1] = pDataXYZ[j];
+            }
+            int threshold = 1700; // unit: 0.01m/ss
+            if(abs(pDataXYZ[0]) > threshold|| abs(pDataXYZ[1]) > threshold || abs(pDataXYZ[2]) > threshold){
+                //printf("over threshold!\n");
+                break;
+            }
+            thread_sleep_for(5);
+        }    
+        //thread_sleep_for(10);
         LD2_ON;
-        printf("start collecting...\n");
+        //printf("start collecting...\n");
         int sample_num = 0;
         bool idle = false;
-        const int tailnum = 100;
+        const int tailnum = 20;
         int tailsum[axis_num] = {0};
         float taildiff[axis_num] = {0};
         while (!idle){
@@ -451,8 +554,8 @@ int main() {
                     }
                 }
             }
-            if(sample_num >= tailnum){
-                printf("%f, %f, %f\n",taildiff[0]/tailnum,taildiff[1]/tailnum,taildiff[2]/tailnum);
+            if(sample_num >= 100){
+                //printf("%f, %f, %f\n",taildiff[0]/tailnum,taildiff[1]/tailnum,taildiff[2]/tailnum);
                 if(taildiff[0]/tailnum < 100 && taildiff[1]/tailnum < 100 && taildiff[2]/tailnum < 100){
                     idle = true;
                     printf("idle detected!\n");
@@ -464,88 +567,61 @@ int main() {
         }
         printf("end collecting.\n");
         LD2_OFF;
-        /*
-        main preprocess section
-        features of one frame:
-        mu,epsilon,delta,sigma, each has [x,y,z]
-        gamma, has C(3,2) = 3, [x,y,z], for x is x with y
-        features of all frames are stored by 3d array: feature
-        
-        float32_t feature[N][5][axis_num] = {0};
-        arm_rfft_fast_instance_f32 fftins;
-        arm_rfft_fast_init_f32(&fftins, 64);
 
-        for (int fseq = 0; fseq < N; fseq++){
-            for(int axis = 0; axis < axis_num; axis++){
-                float32_t *timeframe = new float32_t[2*Ls];
-                float32_t *natimeframe = new float32_t[2*Ls];
-                float32_t *freqframe = new float32_t[2*Ls];
-                float32_t freqframe_mag[Ls];
-                for(int i = 0; i < 2*Ls; i++){
-                    timeframe[i] = 0;
-                    natimeframe[i] = 0;
-                    freqframe[i] = 0;
+
+
+        int16_t **R_send = new int16_t*[axis_num];
+        for (int i = 0; i < axis_num; i++){
+            R_send[i] = new int16_t[sample_num+Rpcap];
+        }
+        for (int i = 0; i < axis_num; i++){
+            for (int j = 0; j < sample_num+Rpcap; j++) {
+                if(j < Rpcap){
+                    R_send[i][j] = R_pre[i][j];
                 }
-                for(int i = 0; i < 2*Ls; i++){
-                    //extract frame data from R
-                    timeframe[i] = R[axis][i+fseq*Ls];
-                    natimeframe[i] = R[(axis+1)%3][i+fseq*Ls];         
+                else{
+                    R_send[i][j] = R[i][j-Rpcap];
                 }
-                arm_rfft_fast_f32(&fftins, timeframe, freqframe, 0);
-                
-                //mu,index 0--------------------------------------
-                feature[fseq][0][axis] = freqframe[0];
-                //epsilon,index 1---------------------------------
-                float32_t magsum = 0;
-                for(int i = 1; i < Ls; i++){
-                    freqframe_mag[i] = sqrt(pow(freqframe[2*i],2)+pow(freqframe[2*i+1],2));
-                    magsum += freqframe_mag[i];
-                }
-                for(int i = 1; i < Ls; i++){
-                    feature[fseq][1][axis] += pow(freqframe_mag[i],2);
-                }
-                feature[fseq][1][axis] /= Ls-1;
-                //delta,index 2-----------------------------------
-                float32_t p;
-                for(int i = 1; i < Ls; i++){
-                    p = freqframe_mag[i]/magsum;
-                    feature[fseq][2][axis] += p == 0 ? 0 : p*log(1/p);
-                }
-                //sigma,index 3-----------------------------------
-                float32_t time_bar = 0;
-                float32_t natime_bar = 0;
-                float32_t nasigma = 0;
-                for(int i = 0; i < 2*Ls; i++){
-                    time_bar += timeframe[i];
-                    natime_bar += natimeframe[i];
-                }
-                time_bar /= 2*Ls;
-                natime_bar /= 2*Ls;
-                for( int i = 0; i < 2*Ls; i++){
-                    feature[fseq][3][axis] += pow(timeframe[i]-time_bar, 2);
-                    nasigma += pow(natimeframe[i]-natime_bar, 2);
-                }
-                feature[fseq][3][axis] /= 2*Ls;
-                nasigma /= 2*Ls;
-                feature[fseq][3][axis] = sqrt(feature[fseq][3][axis]);
-                nasigma = sqrt(nasigma);
-                //gamma,index 4-----------------------------------
-                for(int i = 0; i < 2*Ls; i++){
-                    feature[fseq][4][axis] += (timeframe[i]-time_bar)*(natimeframe[i]-natime_bar);
-                }
-                feature[fseq][4][axis] /= 2*Ls*feature[fseq][3][axis]*nasigma;
-                //delete
-                delete [] timeframe;
-                delete [] natimeframe;
-                delete [] freqframe;
             }
-        }*/
-        if(!WIFI->send(R, sample_num-80)){
+        }
+        for(int i = 0; i<axis_num; i++){
+            for(int j = 0; j<200; j++){
+                if(j >= sample_num+Rpcap-1){
+                    acc_data[j] = R_send[i][sample_num+Rpcap-1];
+                }else{
+                    acc_data[j] = R_send[i][j];
+                }
+            }
+            
+            inputF32 = &acc_data[0];
+            outputF32 = R_filtered[i];
+            for(i=0; i < numBlocks; i++){
+                arm_fir_f32(&S, inputF32 + (i * blockSize), outputF32 + (i * blockSize), blockSize);
+            }
+        }
+
+        // WIFI->send(R_send, sample_num+Rpcap-40);
+
+        // for(int i = 0; i < axis_num; i++){
+        //     for(int j = 0; j < 200; j++){
+        //        printf("%f\n", R_filtered[i][j]); 
+        //     }
+        // }
+
+        if(!WIFI->send(R_send, sample_num+Rpcap-40)){
             delete WIFI;
             WIFI = new SocketDemo();
             WIFI->conn_wifi();
-            WIFI->send(R, sample_num-80);
+            //WIFI->send(R_pre, sample_num-80);
+            WIFI->send(R_send, sample_num+Rpcap-40);
         }
+        /*
+        for(int i = 0; i < axis_num; i++){
+            for(int j = 0; j < sample_num+Rpcap; j++){
+               printf("%d\n", R_send[i][j]); 
+            }
+        }
+        */
     }
     
     return 0;
