@@ -1,0 +1,23 @@
+.DS_Store
+
+# clion
+.idea/
+cmake-build-*/
+
+# exporters
+GettingStarted.html
+eclipse-extras/
+
+# mbed build system
+mbed-os/
+mbed_settings.py
+mbed_config.h
+*.pyc
+BUILD/
+cmake-build-debug/
+BUILD
+.mbed
+mbed-os
+COMPONENT_ism43362
+BSP_B-L475E-IOT01
+mbed-dsp
